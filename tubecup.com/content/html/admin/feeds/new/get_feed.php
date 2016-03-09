@@ -52,17 +52,20 @@ $csv_separator=trim($_GET['csv_separator']);
 $csv_columns=trim($_GET['csv_columns']);
 $sorting=trim($_GET['sorting']);
 $player_skin=trim($_GET['player_skin']);
-$player_autoplay=trim($_GET['player_autoplay']);
 $player_width=intval($_GET['player_width']);
 $player_height=intval($_GET['player_height']);
 $sponsor_filter=trim($_GET['sponsor']);
 $category_filter=trim($_GET['category']);
+$categories_filter=trim($_GET['categories']);
+$query_filter=trim($_GET['q']);
 $tag_filter=trim($_GET['tag']);
 $model_filter=trim($_GET['model']);
 if ($config['dvds_mode']=='channels')
 {
 	$dvd_filter=trim($_GET['channel']);
 }
+//Only HD
+$only_hd_filter=trim($_GET['only_hd']);
 
 $screenshot_formats=mr2array_list(sql("select size from $config[tables_prefix]formats_screenshots where group_id=1"));
 if ($feed_options['enable_screenshot_sources']==1)
@@ -100,6 +103,25 @@ if ($feed['password']<>'' && $feed['password']<>$password)
 	die;
 }
 
+//mod sql_wrapped
+function sql_wrapped()
+{
+    $args=func_get_args();
+    $sql=sql_placeholder(array_shift($args),$args);
+
+    $result=sql($sql);
+    if (mysql_errno()==2006)
+    {
+        mysql_close();
+        mysql_connect(DB_HOST,DB_LOGIN,DB_PASS) or die('Cannot connect to DB');
+        mysql_selectdb(DB_DEVICE);
+        sql("set wait_timeout=86400");
+        $result=sql($sql);
+    }
+    return $result;
+}
+//mod
+
 if ($_GET['action']=='get_deleted' || $_GET['action']=='get_deleted_ids' || $_GET['action']=='get_deleted_urls')
 {
 	$where_days="";
@@ -112,6 +134,80 @@ if ($_GET['action']=='get_deleted' || $_GET['action']=='get_deleted_ids' || $_GE
 	{
 		$selector="url";
 	}
+    //mod
+    $csv_columns=explode('|',$csv_columns);
+    
+    // старый файл
+    if (in_array('old_db',$csv_columns)){
+    
+        //$data=mr2array(sql("select * from $config[tables_prefix]deleted_content"));
+        //print_r($data);die;
+    
+        $data=explode("\n",@file_get_contents("$config[project_path]/admin/data/engine/deleted/videos.dat"));
+        foreach ($data as $item)
+        {
+            $item=explode("|",$item);
+            $url = '';
+            if (isset($item[2])) $url = $item[2];
+
+            //sql_wrapped("insert into $config[tables_prefix]deleted_content set object_type_id=1,object_id=?,deleted_date=?,url=?",$item[0],$item[1],$url);
+            sql_wrapped("update $config[tables_prefix]deleted_content set url=? where object_type_id=1 AND object_id=?",$url,$item[0]);
+            
+            echo $item[0].'|'.$url.'<br>';
+            
+        }
+        die('ok');
+    }
+    //
+    
+    $allowed_columns=array('id','link');
+    foreach ($csv_columns as $k=>$csv_column)
+    {
+        if ($csv_column=='' || !in_array($csv_column,$allowed_columns))
+        {
+            unset($csv_columns[$k]);
+            continue;
+        }
+    }
+    if (count($csv_columns)==0)$csv_columns=array('id');
+    if (in_array($feed_format,array('csv','kvs')))
+    {
+        include_once("$config[project_path]/admin/feeds/$feed_format.php");
+        if ($feed_format=='csv')
+        {
+            $feed_config['csv_separator']=$csv_separator;
+            if (is_array($csv_columns))
+            {
+                $feed_config['csv_columns']=$csv_columns;
+            }
+        }
+        
+        if ($limit==0 || $limit>$feed['max_limit'])
+        {
+            $limit=$feed['max_limit'];
+        }
+        
+        $where_link = "";
+        if (in_array('link',$csv_columns)) $where_link = "and CHAR_LENGTH(url)>1";
+        
+        $selector = "object_id as video_id, url as website_link";
+        
+        $data=mr2array(sql("select $selector from $config[tables_prefix]deleted_content where object_type_id=1 $where_days $where_link order by deleted_date DESC LIMIT $limit"));
+        
+        if ($feed['affiliate_param_name']<>'' && $_REQUEST[$feed['affiliate_param_name']]<>'')
+        {
+            $affiliate_str="?$feed[affiliate_param_name]=".$_REQUEST[$feed['affiliate_param_name']];
+            foreach ($data as $k=>$video)
+            {
+                $data[$k]['website_link'] = $video['website_link'].$affiliate_str;
+            }
+        }
+        $format_func="{$feed_format}_format_feed";
+        echo $format_func($data,$feed_config);
+
+        die;
+    }
+    //end mod
 	header("Content-Type: text/plain");
 	$data=mr2array_list(sql("select $selector from $config[tables_prefix]deleted_content where object_type_id=1 $where_days order by deleted_date asc"));
 	foreach ($data as $item)
@@ -275,18 +371,14 @@ if ($player_skin<>'')
 		print_doc($feed);
 		die;
 	}
-}
-
-if ($player_autoplay<>'')
-{
-	if (!in_array($player_autoplay,array('true','false')))
+	if ($player_skin=='white')
 	{
-		header("Content-Type: text/plain");
-		echo "ERROR: player autostart flag is invalid\n\n";
-		echo "================================================================================\n\n";
-		print_doc($feed);
-		die;
+		$player_skin=2;
+	} else {
+		$player_skin=1;
 	}
+} else {
+	$player_skin=1;
 }
 
 if ($csv_columns<>'')
@@ -403,6 +495,33 @@ if ($category_filter<>'')
 		$has_advanced_filter=1;
 	}
 }
+//custom filters start
+if ($categories_filter<>'')
+{
+    $temp_where="";
+    $categories_filter=explode(",",$categories_filter);
+    foreach ($categories_filter as $cat_filter)
+    {
+        $category_id=mysql_result(sql_pr("select category_id from $config[tables_prefix]categories where title=?",$cat_filter),0);
+        if ($category_id>0)
+        {
+            if ($temp_where<>'') {
+                $temp_where.=" or ";
+            }
+            $temp_where.=" video_id in (select video_id from $config[tables_prefix]categories_videos where category_id=$category_id)";
+        }
+    }
+    if ($temp_where<>'')
+    {
+        $where.=" and ($temp_where)";
+    }
+}
+if ($query_filter<>'')
+{
+    $query_filter=str_replace("'","\'",$query_filter);
+    $where.=" and ($config[tables_prefix]videos.title like '%$query_filter%' or $config[tables_prefix]videos.description like '%$query_filter%')";
+}
+//custom filters end
 if ($tag_filter<>'')
 {
 	$tag_id=mysql_result(sql_pr("select tag_id from $config[tables_prefix]tags where tag=?",$tag_filter),0);
@@ -422,6 +541,13 @@ if ($model_filter<>'')
 	}
 }
 
+//Only HD
+if ($only_hd_filter<>'')
+{
+    //$config[tables_prefix]videos.file_formats
+    $where.=" and file_formats like '%mp4|1280x720%'";
+}
+
 $load_type_ids="1,4";
 if ($feed_options['video_content_type_id']==1)
 {
@@ -438,18 +564,12 @@ if ($feed_options['video_content_type_id']==1)
 }
 
 $now_date=date("Y-m-d H:i:s");
-$post_date_filter="and post_date<='$now_date'";
-if ($feed_options['enable_future_dates']==1)
-{
-	$post_date_filter="";
-}
-
 $localization_columns="";
 if ($feed_options['enable_localization']==1)
 {
 	foreach ($languages as $language)
 	{
-		$localization_columns.="$config[tables_prefix]videos.title_$language[code], $config[tables_prefix]videos.description_$language[code], $config[tables_prefix]videos.dir_$language[code], $config[tables_prefix]content_sources.title_$language[code] as cs_title_$language[code], $config[tables_prefix]dvds.title_$language[code] as dvd_title_$language[code], ";
+		$localization_columns.="$config[tables_prefix]videos.title_$language[code], $config[tables_prefix]videos.description_$language[code], $config[tables_prefix]videos.dir_$language[code], ";
 	}
 }
 $query="SELECT
@@ -485,7 +605,7 @@ $query="SELECT
 			left join $config[tables_prefix]content_sources on $config[tables_prefix]videos.content_source_id=$config[tables_prefix]content_sources.content_source_id
 			left join $config[tables_prefix]dvds on $config[tables_prefix]videos.dvd_id=$config[tables_prefix]dvds.dvd_id
 			left join $config[tables_prefix]users on $config[tables_prefix]videos.user_id=$config[tables_prefix]users.user_id
-		WHERE $config[tables_prefix]videos.status_id=1 $post_date_filter and relative_post_date<=0 and load_type_id in ($load_type_ids) $where order by $sorting LIMIT $limit";
+		WHERE $config[tables_prefix]videos.status_id=1 and relative_post_date<=0 and post_date<=? and load_type_id in ($load_type_ids) $where order by $sorting LIMIT $limit";
 
 if ($has_advanced_filter==1 && $feed['cache']>0)
 {
@@ -503,7 +623,7 @@ if ($has_advanced_filter==1 && $feed['cache']>0)
 	}
 	if ($has_cached_version==0)
 	{
-		$data=mr2array(sql_pr($query));
+		$data=mr2array(sql_pr($query,$now_date));
 		if (!is_dir("$cache_dir")) {mkdir("$cache_dir",0777);chmod("$cache_dir",0777);}
 		if (!is_dir("$cache_dir/$hash[0]$hash[1]")) {mkdir("$cache_dir/$hash[0]$hash[1]",0777);chmod("$cache_dir/$hash[0]$hash[1]",0777);}
 		$fp=fopen("$cache_dir/$hash[0]$hash[1]/$hash.dat","w");
@@ -512,7 +632,7 @@ if ($has_advanced_filter==1 && $feed['cache']>0)
 		fclose($fp);
 	}
 } else {
-	$data=mr2array(sql_pr($query));
+	$data=mr2array(sql_pr($query,$now_date));
 }
 
 $website_ui_data=@unserialize(file_get_contents("$config[project_path]/admin/data/system/website_ui_params.dat"));
@@ -549,16 +669,6 @@ foreach ($data as $k=>$video)
 			$data[$k]['description']=$video["description_$locale"];
 			$video['description']=$video["description_$locale"];
 		}
-		if ($video["cs_title_$locale"]!='')
-		{
-			$data[$k]['cs_title']=$video["cs_title_$locale"];
-			$video['cs_title']=$video["cs_title_$locale"];
-		}
-		if ($video["dvd_title_$locale"]!='')
-		{
-			$data[$k]['dvd_title']=$video["dvd_title_$locale"];
-			$video['dvd_title']=$video["dvd_title_$locale"];
-		}
 	}
 
 	if ($pattern<>'')
@@ -581,15 +691,15 @@ foreach ($data as $k=>$video)
 
 	if ($feed_options['enable_categories']==1)
 	{
-		$data[$k]['categories']=get_video_categories($video_id,$feed['cache'],($feed_options['enable_localization']==1 && $locale!='') ? $locale : "");
+		$data[$k]['categories']=get_video_categories($video_id,$feed['cache']);
 	}
 	if ($feed_options['enable_tags']==1)
 	{
-		$data[$k]['tags']=get_video_tags($video_id,$feed['cache'],($feed_options['enable_localization']==1 && $locale!='') ? $locale : "");
+		$data[$k]['tags']=get_video_tags($video_id,$feed['cache']);
 	}
 	if ($feed_options['enable_models']==1)
 	{
-		$data[$k]['models']=get_video_models($video_id,$feed['cache'],($feed_options['enable_localization']==1 && $locale!='') ? $locale : "");
+		$data[$k]['models']=get_video_models($video_id,$feed['cache']);
 	}
 
 	if ($feed_options['video_content_type_id']==2 || $feed_options['video_content_type_id']==4)
@@ -722,26 +832,18 @@ foreach ($data as $k=>$video)
 					}
 				}
 			}
-			$options=array();
-			if ($player_autoplay!='')
+			$embed_code='';
+			$autoplay='';
+			if ($player_data_embed['enable_autoplay']==1)
 			{
-				$options[]="autoplay=$player_autoplay";
+				$autoplay="&amp;autoplay=true";
 			}
-			if ($player_skin!='')
+			$embed_code="<iframe width=\"$video_width\" height=\"$video_height\" src=\"$config[project_url]/embed/$video_id$affiliate_str\" frameborder=\"0\" allowfullscreen webkitallowfullscreen mozallowfullscreen oallowfullscreen msallowfullscreen></iframe>";
+			$data[$k]['embed']=$embed_code;
+			if ($embed_code=='')
 			{
-				$options[]="skin=$player_skin";
+				unset($data[$k]);
 			}
-			if ($feed['affiliate_param_name']<>'' && $_REQUEST[$feed['affiliate_param_name']]<>'')
-			{
-				$options[]="$feed[affiliate_param_name]=".$_REQUEST[$feed['affiliate_param_name']];
-			}
-			if (count($options)>0)
-			{
-				$options='?'.implode('&amp;',$options);
-			} else {
-				$options='';
-			}
-			$data[$k]['embed']="<iframe width=\"$video_width\" height=\"$video_height\" src=\"$config[project_url]/embed/$video_id$options\" frameborder=\"0\" allowfullscreen webkitallowfullscreen mozallowfullscreen oallowfullscreen msallowfullscreen></iframe>";
 		}
 	}
 }
@@ -772,12 +874,12 @@ echo $format_func($data,$feed_config);
 
 die;
 
-function get_video_tags($video_id,$cache,$locale)
+function get_video_tags($video_id,$cache)
 {
 	global $config;
 
 	$cache_dir="$config[project_path]/admin/data/engine/feeds_info";
-	$hash=md5($video_id.$locale);
+	$hash=md5($video_id);
 
 	if (is_file("$cache_dir/$hash[0]$hash[1]/$video_id.dat") && time()-filectime("$cache_dir/$hash[0]$hash[1]/$video_id.dat")<$cache)
 	{
@@ -788,12 +890,7 @@ function get_video_tags($video_id,$cache,$locale)
 		}
 	}
 
-	$tag_field="tag";
-	if ($locale!='')
-	{
-		$tag_field="case when tag_$locale<>'' then tag_$locale else tag end";
-	}
-	$data['tags']=mr2array_list(sql_pr("select (select $tag_field from $config[tables_prefix]tags where tag_id=$config[tables_prefix]tags_videos.tag_id) as tag from $config[tables_prefix]tags_videos where $config[tables_prefix]tags_videos.video_id=$video_id order by id asc"));
+	$data['tags']=mr2array_list(sql_pr("select (select tag from $config[tables_prefix]tags where tag_id=$config[tables_prefix]tags_videos.tag_id) as tag from $config[tables_prefix]tags_videos where $config[tables_prefix]tags_videos.video_id=$video_id order by id asc"));
 
 	if ($cache>0)
 	{
@@ -808,12 +905,12 @@ function get_video_tags($video_id,$cache,$locale)
 	return $data['tags'];
 }
 
-function get_video_categories($video_id,$cache,$locale)
+function get_video_categories($video_id,$cache)
 {
 	global $config;
 
 	$cache_dir="$config[project_path]/admin/data/engine/feeds_info";
-	$hash=md5($video_id.$locale);
+	$hash=md5($video_id);
 
 	if (is_file("$cache_dir/$hash[0]$hash[1]/$video_id.dat") && time()-filectime("$cache_dir/$hash[0]$hash[1]/$video_id.dat")<$cache)
 	{
@@ -824,12 +921,7 @@ function get_video_categories($video_id,$cache,$locale)
 		}
 	}
 
-	$title_field="title";
-	if ($locale!='')
-	{
-		$title_field="case when title_$locale<>'' then title_$locale else title end";
-	}
-	$data['categories']=mr2array_list(sql_pr("select (select $title_field from $config[tables_prefix]categories where category_id=$config[tables_prefix]categories_videos.category_id) as title from $config[tables_prefix]categories_videos where $config[tables_prefix]categories_videos.video_id=$video_id order by id asc"));
+	$data['categories']=mr2array_list(sql_pr("select (select title from $config[tables_prefix]categories where category_id=$config[tables_prefix]categories_videos.category_id) as title from $config[tables_prefix]categories_videos where $config[tables_prefix]categories_videos.video_id=$video_id order by id asc"));
 
 	if ($cache>0)
 	{
@@ -844,12 +936,12 @@ function get_video_categories($video_id,$cache,$locale)
 	return $data['categories'];
 }
 
-function get_video_models($video_id,$cache,$locale)
+function get_video_models($video_id,$cache)
 {
 	global $config;
 
 	$cache_dir="$config[project_path]/admin/data/engine/feeds_info";
-	$hash=md5($video_id.$locale);
+	$hash=md5($video_id);
 
 	if (is_file("$cache_dir/$hash[0]$hash[1]/$video_id.dat") && time()-filectime("$cache_dir/$hash[0]$hash[1]/$video_id.dat")<$cache)
 	{
@@ -860,12 +952,7 @@ function get_video_models($video_id,$cache,$locale)
 		}
 	}
 
-	$title_field="title";
-	if ($locale!='')
-	{
-		$title_field="case when title_$locale<>'' then title_$locale else title end";
-	}
-	$data['models']=mr2array_list(sql_pr("select (select $title_field from $config[tables_prefix]models where model_id=$config[tables_prefix]models_videos.model_id) as title from $config[tables_prefix]models_videos where $config[tables_prefix]models_videos.video_id=$video_id order by id asc"));
+	$data['models']=mr2array_list(sql_pr("select (select title from $config[tables_prefix]models where model_id=$config[tables_prefix]models_videos.model_id) as title from $config[tables_prefix]models_videos where $config[tables_prefix]models_videos.video_id=$video_id order by id asc"));
 
 	if ($cache>0)
 	{
@@ -1027,11 +1114,8 @@ function print_doc($feed)
 	{
 		echo "- player_skin [enumeration(black, white), optional]:\n";
 		echo "\n";
-		echo "    Specify which skin you would like to use in embed player.\n";
-		echo "\n";
-		echo "- player_autoplay [enumeration(true, false), optional]:\n";
-		echo "\n";
-		echo "    Specify whether you want player to start video immediately.\n";
+		echo "    Specify which skin you would like to use in embed player. Black skin\n";
+		echo "    will be used by default.\n";
 		echo "\n";
 		echo "- player_width [integer, optional]:\n";
 		echo "\n";
