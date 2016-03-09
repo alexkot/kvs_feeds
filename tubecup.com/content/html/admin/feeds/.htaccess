@@ -1,0 +1,6 @@
+RewriteEngine on
+Options +FollowSymlinks
+RewriteBase /admin/feeds
+
+RewriteRule ^(.*)/$ get_feed.php?external_id=$1 [L,QSA]
+RewriteRule ^(.*)$ get_feed.php?external_id=$1 [L,QSA]
